@@ -1,0 +1,26 @@
+---
+Checks: '
+-*,
+performance-*,
+clang-analyzer-*,
+
+hicpp-use-nullptr,
+cppcoreguidelines-init-variables,
+modernize-use-bool-literals,
+clang-diagnostic-implicit-int-conversion,
+readability-make-member-function-const,
+modernize-redundant-void-arg,
+readability-redundant-string-cstr,
+
+-readability-braces-around-statements,
+-concurrency-mt-unsafe,
+-cppcoreguidelines-owning-memory,
+-readability-use-anyofallof,
+-cppcoreguidelines-pro-type-member-init,
+-hicpp-use-auto,
+-readability-implicit-bool-conversion,
+-hicpp-explicit-conversions,
+'
+WarningsAsErrors: '*'
+
+

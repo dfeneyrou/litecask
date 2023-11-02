@@ -1,0 +1,19 @@
+# This project uses optimistic locking. Data races are then expected but detected at run-time and the operation is performed again  until free of collision.
+# It also uses some double banks mechanism so that a not harmful data race can appear on duplicated content.
+# The effective non-corruption is checked with stress tests which validate the data integrity.
+
+race:memcmp
+race:memcpy
+race:updateKey
+
+# False positive on some compilers
+# See https://github.com/google/sanitizers/issues/1259
+mutex:pthread_mutex_lock
+
+# This data race is harmless as any (non corrupted) value of this integral variable is ok
+# The multiple writing of this variable is protected, only the reading while writing is not
+race:getAllocatedBytes
+
+# Misc harmless datarace
+race:backgroundExpiredKeyCleaning
+race:getValue

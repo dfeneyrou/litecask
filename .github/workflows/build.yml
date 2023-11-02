@@ -1,0 +1,123 @@
+name: Build and check
+on: [ push, pull_request ]
+
+jobs:
+
+  static-analysis:
+    name: Static analysis
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v3
+      - name: Install dependencies
+        run: |
+          sudo apt update -y
+          sudo apt install -y clang-format clang-tidy python3-autopep8 cmake-format
+      - name: Formatting
+        run: |
+          ./ci/format.py nofix
+      - name: Static analysis
+        run: |
+          ./ci/tidy.py
+
+  tests-linux:
+    name: Linux build and tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v3
+      - name: Install dependencies
+        run: |
+          sudo apt update -y
+          pip install matplotlib
+      - name: Build
+        run: |
+          mkdir build
+          cd    build
+          cmake ..
+          make -j $(nproc)
+      - name: Sanity tests
+        run: |
+          cd build
+          ./bin/litecask_test sanity
+      - name: Benchmarks
+        run: |
+          cd build
+          ./bin/litecask_test benchmark -l
+          ../ci/benchmark.py -n
+      - name: Benchmark report
+        run: |
+          cd build
+          ../ci/benchmark.py -n
+      - uses: actions/upload-artifact@v3
+        with:
+          name: linux-benchmark-results
+          path: |
+            build/*.png
+            build/*.csv
+
+  sanitizers:
+    name: Sanitizers
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v3
+      - name: Install dependencies
+        run: |
+          sudo apt update -y
+      - name: Address sanitizer
+        run: |
+          mkdir build-asan
+          cd build-asan
+          cmake -DCMAKE_BUILD_TYPE=Debug -DENABLE_ASAN=1 ..
+          make -j $(nproc)
+          ./bin/litecask_test sanity benchmark
+      - name: Thread sanitizer
+        run: |
+          mkdir build-tsan
+          cd build-tsan
+          cmake -DCMAKE_BUILD_TYPE=Debug -DENABLE_TSAN=1 ..
+          make -j $(nproc)
+          TSAN_OPTIONS="suppressions=../ci/tsan_suppression.supp" ./bin/litecask_test sanity -tc="*multithread*"
+
+
+  tests-windows:
+    name: Windows build and tests
+    runs-on: windows-2019
+    env:
+      VS_PATH: C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\
+
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Build with VS
+        shell: cmd
+        run: |
+          mkdir build
+          cd build
+          cmake -G "Visual Studio 16 2019" -A x64 -S .. -B "build64"
+          cmake --build build64 --config Release
+
+      - name: Sanity tests
+        shell: cmd
+        run: |
+          cd build
+          build64\bin\Release\litecask_test.exe sanity
+
+      - name: Benchmarks
+        shell: cmd
+        run: |
+          cd build
+          build64\bin\Release\litecask_test.exe benchmark
+
+      - uses: actions/upload-artifact@v3
+        with:
+          name: windows-benchmark-results
+          path: build/*.csv
+
