@@ -860,7 +860,7 @@ Also this project is young, feedback is welcome!
 
 ### License
 
-Litecask source code is available under the [MIT license](https://github.com/dfeneyrou/litecask/LICENSE)
+Litecask source code is available under the [MIT license](https://github.com/dfeneyrou/litecask/blob/main/LICENSE)
 
 Associated components:
  - Hash function: [`Wyhash`](https://github.com/wangyi-fudan/wyhash)
