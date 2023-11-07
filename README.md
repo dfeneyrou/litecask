@@ -1,10 +1,9 @@
-![litecasks-logo](https://github.com/dfeneyrou/test/blob/main/doc/images/litecask-logo.png)
+![litecasks-logo](https://github.com/dfeneyrou/litecask/blob/main/doc/images/litecask-logo.png)
 
-[![Build and check](https://github.com/dfeneyrou/test/actions/workflows/build.yml/badge.svg)](https://github.com/dfeneyrou/test/actions/workflows/build.yml)
+[![Build and check](https://github.com/dfeneyrou/litecask/actions/workflows/build.yml/badge.svg)](https://github.com/dfeneyrou/litecask/actions/workflows/build.yml)
 
-## Litecask: a high performance embeddable persistent key-value store
- - C++17 **single-header**
- - Based on [`Bitcask`](https://riak.com/assets/bitcask-intro.pdf)
+## Litecask: a C++ single-header persistent key-value store
+ - Based on [`Bitcask`](https://riak.com/assets/bitcask-intro.pdf) principles
  - High performance
    - Insertion rate bottleneck is the disk I/O saturation
    - Lookup throughput benefits from a scalable **concurrent hashtable** and a **built-in memory cache**
@@ -23,7 +22,7 @@
  - an enhanced implementation of [`Bitcask`](https://riak.com/assets/bitcask-intro.pdf), additionally featuring:
    - a built-in cache
    - indexing capabilities
- - a single header file, including:
+ - a C++17 single-header file, including:
    - a [`TLSF`](http://www.gii.upv.es/tlsf) heap-based memory allocator
    - a concurrent hashtable with optimistic locking (inspired by [`memC3`](https://github.com/efficient/memc3) and [this analysis](https://memcached.org/blog/paper-review-memc3/))
    - a lock-free RW-lock (aka shared mutex) reducing both false sharing and kernel access
@@ -33,7 +32,8 @@
  - a remote database
    - it misses some layers: a high performance network part (asio, evpp...) with a client-server communication protocol
  - a billion entries database. Indeed, a fundament of [`Bitcask`](https://riak.com/assets/bitcask-intro.pdf) is to keep the key directory in memory.
-   - 100 millions entries is however in its range, depending on average key size and available RAM (value size does not matter, up to ~256 TB total)
+   - 100 millions entries is however in its range, depending on average key size and available RAM
+     - value sizes do not matter as they are not kept in memory, cache excepted
    - scaling horizontally would imply making the database remote and sharded
 
 ## Getting started
@@ -80,7 +80,7 @@ make -j $(nproc)
 
 #### Monothread performance
 
-![litecasks-logo](https://github.com/dfeneyrou/test/blob/main/doc/images/litecask_benchmark_throughput_monothread.png)
+![litecasks-logo](https://github.com/dfeneyrou/litecask/blob/main/doc/images/litecask_benchmark_throughput_monothread.png)
 
 Result for a 1 million entries database, 8 bytes keys, values in cache and Zipf-1.0 access distribution.
 
@@ -88,7 +88,7 @@ The memory throughput graph on the right is deduced from the left graph and the 
 The lower rate when writing is due to disk I/O bottleneck, highlighted by the asymptote when value size grows.
 
 #### Multithread performance
-![litecasks-logo](https://github.com/dfeneyrou/test/blob/main/doc/images/litecask_benchmark_throughput_multithread.png)
+![litecasks-logo](https://github.com/dfeneyrou/litecask/blob/main/doc/images/litecask_benchmark_throughput_multithread.png)
 
 Result for a 1 million entries database, 8 bytes keys, 256 bytes values, values in cache and Zipf-1.0 access distribution.
 

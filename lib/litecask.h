@@ -966,9 +966,9 @@ wyhash(const void* key, size_t len)
 #ifdef LITECASK_STANDARD_SHARED_MUTEX
 
 // The standard shared mutex is a risk-less implementation but its performance does not scale well with increasing thread quantity (on Linux
-// at least), probably due to its implementation not paying enough attention to memory false sharing across cores and going to kernel to
-// early. Measurements show that 100% read scales poorly and that ~5% write is enough to collapse the overall performance.
-// This version is and encapsulation of standard library and is present just for validation and comparison purposes.
+// at least) probably due to its generic implementation not focussed enough on false sharing across cores and avoiding going to kernel.
+// Measurements show that 100% reading scales poorly and that ~5% write collapses the overall performance.
+// This RWLock is an encapsulation of the standard library and its presence just serves validation and comparison purposes.
 class RWLock
 {
    public:
@@ -985,9 +985,9 @@ class RWLock
 };
 #else
 
-// This custom implementation of shared mutex avoids the costly false sharing by having a dedicated cache line per thread to mark its lock
-// request (yes, more memory is used compared to the standard shared mutex). The cost of the per-reader check is moved on the exclusive lock
-// side, which is fully compatible with our system where writing operations are serialized and more expensive. Also, lock requests spin
+// This custom implementation of shared mutex avoids costly false sharing by having a dedicated cache line per thread to mark its lock
+// request ( more memory is used compared to the standard shared mutex). The cost of the per-reader check is moved on the exclusive lock
+// side, which is fully in agreement with our system where writing operations are serialized and more expensive. Also, lock requests spin
 // before going to the kernel, improving the reactivity in most cases.
 class RWLock
 {
