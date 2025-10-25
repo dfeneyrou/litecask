@@ -16,5 +16,7 @@ target_sources(
 target_link_libraries(litecask_test PRIVATE libexternal litecask Threads::Threads)
 
 # Display some build information
-add_custom_command(TARGET litecask_test POST_BUILD
-                   COMMENT "Using ${CMAKE_CXX_COMPILER} [${CMAKE_BUILD_TYPE}]" VERBATIM)
+add_custom_command(
+  TARGET litecask_test POST_BUILD COMMAND ${CMAKE_COMMAND} -E echo
+                                          "Using ${CMAKE_CXX_COMPILER} [${CMAKE_BUILD_TYPE}]"
+  VERBATIM)
