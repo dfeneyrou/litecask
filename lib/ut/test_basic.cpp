@@ -22,6 +22,17 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+#include <assert.h>
+#include <stdint.h>
+#include <string.h>
+
+#include <atomic>
+#include <chrono>
+#include <filesystem>
+#include <string>
+#include <thread>
+#include <vector>
+
 #include "test_main.h"
 
 using namespace litecask;
@@ -371,6 +382,8 @@ TEST_SUITE("Basic")
                             case 4:
                                 s = store.put(keyStr, value, indexes);
                                 break;  // Add an entry with key as a string and value as a vector
+                            default:
+                                break;
                         }
                         CHECK_EQ(s, Status::Ok);
 
@@ -385,6 +398,8 @@ TEST_SUITE("Basic")
                             case 2:
                                 s = store.get(keyStr, retrievedValue);
                                 break;  // Get an entry with key as a string
+                            default:
+                                break;
                         }
                         CHECK_EQ(s, Status::Ok);
                         CHECK_EQ(retrievedValue.size(), VALUE_SIZE);
@@ -416,6 +431,8 @@ TEST_SUITE("Basic")
                             case 7:
                                 s = store.query(lcVector<lcString>{"\x02\x03\x04\x05"}, arenaMatchingKeys, alloc);
                                 break;  // Query key with multiple string API and arena output
+                            default:
+                                break;
                         }
                         CHECK_EQ(s, Status::Ok);
                         CHECK(((matchingKeys.size() == 1) || (arenaMatchingKeys.size() == 1)));
@@ -432,6 +449,8 @@ TEST_SUITE("Basic")
                                 break;
                             case 2:
                                 s = store.remove(keyStr);
+                                break;
+                            default:
                                 break;
                         }
                         CHECK_EQ(s, Status::Ok);

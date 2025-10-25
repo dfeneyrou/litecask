@@ -22,6 +22,12 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+#include <stdint.h>
+
+#include <filesystem>
+#include <thread>
+#include <vector>
+
 #include "test_main.h"
 
 using namespace litecask;
@@ -35,7 +41,6 @@ readThread(Datastore* store, uint32_t firstNumber, uint32_t qty)
 {
     constexpr uint64_t MaxTries = 1000'000;
     lcVector<uint8_t>  retrievedValue;
-    uint64_t           readTries = 0;
 
     for (uint32_t numberKey = firstNumber; numberKey < firstNumber + qty; ++numberKey) {
         uint64_t consecutiveReadTries = 0;
@@ -45,11 +50,9 @@ readThread(Datastore* store, uint32_t firstNumber, uint32_t qty)
         while (s != Status::Ok && consecutiveReadTries < MaxTries) {
             s = store->get(&numberKey, 4, retrievedValue);
             ++consecutiveReadTries;
-            ++readTries;
         }
         CHECK(consecutiveReadTries < MaxTries);
     }
-    // printf("READ: %u entries, %lu read tries (ratio %.1f)\n", qty, readTries, (double)readTries/(double)qty);
 }
 
 void

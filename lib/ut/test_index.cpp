@@ -22,6 +22,12 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+#include <stdint.h>
+
+#include <filesystem>
+#include <string>
+#include <vector>
+
 #include "test_main.h"
 
 using namespace litecask;

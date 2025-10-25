@@ -25,6 +25,16 @@
 #define DOCTEST_CONFIG_IMPLEMENT
 #include "test_main.h"
 
+#include <stdio.h>
+#include <stdlib.h>
+
+#include <cstring>
+#include <mutex>
+#include <string>
+
+#include "doctest.h"
+#include "litecask.h"
+
 using namespace doctest;
 
 // ==========================================================================================

@@ -22,7 +22,15 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+#include <inttypes.h>
+#include <stdlib.h>
+
+#include <algorithm>
+#include <chrono>
 #include <cstdio>
+#include <filesystem>
+#include <string>
+#include <thread>
 
 #include "litecask.h"
 

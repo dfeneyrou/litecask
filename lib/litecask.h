@@ -86,6 +86,7 @@ int main(int argc, char** argv)
 // Standard
 #include <inttypes.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cassert>
@@ -110,7 +111,7 @@ int main(int argc, char** argv)
 #endif
 
 // Select the standard shared_mutex or the more performant custom one (default). Follow the definition for more information.
-//#define LITECASK_STANDARD_SHARED_MUTEX
+// #define LITECASK_STANDARD_SHARED_MUTEX
 #ifdef LITECASK_STANDARD_SHARED_MUTEX
 #include <shared_mutex>
 #endif
@@ -452,7 +453,7 @@ utf8ToUtf16(const lcString& s)
             trailingBytes = 2;
         else {
             break;
-        }                                                   // Failure, only 16 bits is supported, not 32 bits codepoints
+        }  // Failure, only 16 bits is supported, not 32 bits codepoints
         if (cursor + trailingBytes >= endInput) { break; }  // Failure due to corrupted input
 
         uint32_t output = 0;
@@ -2402,7 +2403,7 @@ class KeyDirMap
                 if (ki.size != keyPartSize || memcmp(&key[ki.startIdx], keyPart, keyPartSize)) { continue; }
                 // Key part is present
                 // Case obsolete entry: the key part is removed (keeping the order)
-                if (kIdx + sizeof(KeyIndex) < (int)keyChunk->keyIndexSize) {
+                if (kIdx + (int)sizeof(KeyIndex) < (int)keyChunk->keyIndexSize) {
                     memmove(&ki, (&ki) + sizeof(KeyIndex), ((int)keyChunk->keyIndexSize - (kIdx + sizeof(KeyIndex))));
                 }
                 assert(keyChunk->keyIndexSize >= (uint8_t)sizeof(KeyIndex));
@@ -2667,7 +2668,7 @@ class KeyDirMap
         *c          = entry;
         c->changeCounter += 1;
         memcpy(ptr + sizeof(KeyChunk), key, entry.keySize);
-        if (entry.keyIndexSize) { memcpy(ptr + sizeof(KeyChunk) + entry.keySize, keyIndexes, entry.keyIndexSize); }
+        if (keyIndexes && entry.keyIndexSize) { memcpy(ptr + sizeof(KeyChunk) + entry.keySize, keyIndexes, entry.keyIndexSize); }
         return Status::Ok;
     }
 
@@ -2701,7 +2702,9 @@ class KeyDirMap
         } else {
             *keyChunk = entry;
             keyChunk->changeCounter += 1;
-            if (entry.keyIndexSize) { memcpy(((uint8_t*)keyChunk) + sizeof(KeyChunk) + entry.keySize, keyIndexes, entry.keyIndexSize); }
+            if (keyIndexes && entry.keyIndexSize) {
+                memcpy(((uint8_t*)keyChunk) + sizeof(KeyChunk) + entry.keySize, keyIndexes, entry.keyIndexSize);
+            }
         }
         return Status::Ok;
     }
@@ -3485,8 +3488,8 @@ class Datastore  // NOLINT(clang-analyzer-optin.performance.Padding)  Padding is
         _mxKeyDir.lock();
         OldKeyChunk oldEntry;
         Status      storageStatus = _keyDir->insertEntry(
-                 (uint32_t)keyHash, key, nullptr,
-                 {0, DeletedEntry, NotStored, entryActiveDataOffset, entryActiveDataFileId, (uint16_t)keySize, 0, 0}, oldEntry);
+            (uint32_t)keyHash, key, nullptr,
+            {0, DeletedEntry, NotStored, entryActiveDataOffset, entryActiveDataFileId, (uint16_t)keySize, 0, 0}, oldEntry);
         _mxKeyDir.unlock();
 
         if (storageStatus != Status::Ok) {
@@ -4415,7 +4418,7 @@ class Datastore  // NOLINT(clang-analyzer-optin.performance.Padding)  Padding is
             }
 
             _mergeWork.store(false);  // Work finished
-        }                             // End of service loop
+        }  // End of service loop
 
         log(LogLevel::Debug, "Merge thread stopped");
     }

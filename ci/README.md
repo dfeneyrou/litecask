@@ -5,4 +5,6 @@ This folder contains workflow tools both for local and `ci` usage.
  - `tidy.py` checks some C++ linting according to the defined rules.
  - `benchmark.py` is a frontend to create the throughput graph pictures.
    - it can reuse already generated benchmark results CVS files from the tests or launch the test by itself.
+- `codeChecker.py` performs a static analysis of the code by CodeChecker (installed via pip).
+    It is not run automatically due to its long running time.
 

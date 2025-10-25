@@ -22,7 +22,18 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+#include <assert.h>
+#include <inttypes.h>
+#include <stdio.h>
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
+#include <filesystem>
+#include <string>
+#include <thread>
+#include <vector>
 
 #include "test_main.h"
 

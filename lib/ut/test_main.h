@@ -24,6 +24,8 @@
 
 #pragma once
 
+#include <stdint.h>
+
 #include <chrono>
 
 #define DOCTEST_CONFIG_SUPER_FAST_ASSERTS 1

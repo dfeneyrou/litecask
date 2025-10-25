@@ -20,6 +20,7 @@ readability-redundant-string-cstr,
 -hicpp-use-auto,
 -readability-implicit-bool-conversion,
 -hicpp-explicit-conversions,
+-performance-enum-size,
 '
 WarningsAsErrors: '*'
 

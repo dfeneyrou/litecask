@@ -86,9 +86,9 @@ jobs:
 
   tests-windows:
     name: Windows build and tests
-    runs-on: windows-2019
+    runs-on: windows-2022
     env:
-      VS_PATH: C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\
+      VS_PATH: C:\Program Files (x86)\Microsoft Visual Studio\2022\Enterprise\
 
     steps:
       - uses: actions/checkout@v3
@@ -101,7 +101,7 @@ jobs:
         run: |
           mkdir build
           cd build
-          cmake -G "Visual Studio 16 2019" -A x64 -S .. -B "build64"
+          cmake -G "Visual Studio 17 2022" -A x64 -S .. -B "build64"
           cmake --build build64 --config Release
 
       - name: Sanity tests
