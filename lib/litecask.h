@@ -292,9 +292,9 @@ struct Config {
     //   in a file to cause it to be included in the merge.
     //   Note: this value shall be equal or less than the corresponding trigger threshold.
     uint32_t mergeSelectDataFileDeadByteThreshold = 10'000'000;
-    //   'mergeSelectDataFileSmallSizeTheshold' describes the minimum size below which a file is included in the merge.
+    //   'mergeSelectDataFileSmallSizeThreshold' describes the minimum size below which a file is included in the merge.
     //   The purpose is to reduce the quantity of small data files to keep open file quantity low.
-    uint32_t mergeSelectDataFileSmallSizeTheshold = 10'000'000;
+    uint32_t mergeSelectDataFileSmallSizeThreshold = 10'000'000;
 };
 
 enum class LogLevel { Debug = 0, Info = 1, Warn = 2, Error = 3, Fatal = 4, None = 5 };
@@ -2967,8 +2967,8 @@ class Datastore  // NOLINT(clang-analyzer-optin.performance.Padding)  Padding is
                 config.mergeTriggerDataFileDeadByteThreshold);
             return Status::InconsistentParameterValues;
         }
-        if (config.mergeSelectDataFileSmallSizeTheshold < detail::MinDataFileMaxBytes) {
-            log(LogLevel::Warn, "setConfig: too small 'mergeSelectDataFileSmallSizeTheshold' parameter value. Shall be above %d",
+        if (config.mergeSelectDataFileSmallSizeThreshold < detail::MinDataFileMaxBytes) {
+            log(LogLevel::Warn, "setConfig: too small 'mergeSelectDataFileSmallSizeThreshold' parameter value. Shall be above %d",
                 detail::MinDataFileMaxBytes);
             return Status::BadParameterValue;
         }
@@ -4382,7 +4382,7 @@ class Datastore  // NOLINT(clang-analyzer-optin.performance.Padding)  Padding is
             lcVector<MergeFileInfo> mergeInfos;
             if (isItWorthMerging(c.mergeTriggerDataFileFragmentationPercentage, c.mergeTriggerDataFileDeadByteThreshold)) {
                 selectDataFilesToMerge(c.mergeSelectDataFileFragmentationPercentage, c.mergeSelectDataFileDeadByteThreshold,
-                                       c.mergeSelectDataFileSmallSizeTheshold, mergeInfos);
+                                       c.mergeSelectDataFileSmallSizeThreshold, mergeInfos);
             }
 
             if (!mergeInfos.empty()) {
@@ -4782,7 +4782,7 @@ class Datastore  // NOLINT(clang-analyzer-optin.performance.Padding)  Padding is
     // The default handler is displaying on console with a relative date
     void defaultLogHandler(LogLevel level, const char* message, bool closeDbNotification) const
     {
-        constexpr const char* levelStr[5] = {"[debug]", "[info ]", "[warn ]", "[error]", "[FATAL]"};
+        constexpr const char* levelStr[5] = {"[debug]", "[info]", "[warn]", "[error]", "[FATAL]"};
         static FILE*          fileHandle  = nullptr;
 
         // Log file management
