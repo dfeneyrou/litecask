@@ -146,6 +146,15 @@ TEST_SUITE("Value cache")
         s = store.open(databasePath);
         CHECK_EQ(s, Status::Ok);
 
+        // This test relies on precise, explicit control of upkeep (via doLruMaintenance() below) to bump/evict
+        // entries at exact, scripted points. Push the automatic periodic upkeep far out so it cannot fire on its
+        // own and interleave with that script - which becomes a real risk under heavy slowdown (e.g. sanitizers),
+        // where the test's wall-clock duration can otherwise exceed the default 1s period.
+        Config c              = store.getConfig();
+        c.upkeepCyclePeriodMs = 3'600'000;
+        s                     = store.setConfig(c);
+        CHECK_EQ(s, Status::Ok);
+
         const ValueCacheCounters& stats    = store.getValueCacheCounters();
         uint32_t                  maxOpQty = cacheByteSize / VALUE_SIZE;  // Element qty that fills the cache for sure
 

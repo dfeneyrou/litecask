@@ -78,8 +78,11 @@ int main(int argc, char** argv)
 
 // Linux
 #include <fcntl.h>     // OS open
+#include <sys/file.h>  // flock
 #include <sys/mman.h>  // mmap
 #include <unistd.h>    // process ID
+
+#include <cerrno>  // errno, EWOULDBLOCK
 
 #endif
 
@@ -114,6 +117,15 @@ int main(int argc, char** argv)
 // #define LITECASK_STANDARD_SHARED_MUTEX
 #ifdef LITECASK_STANDARD_SHARED_MUTEX
 #include <shared_mutex>
+#endif
+
+// Soft limit on the quantity of distinct threads that can concurrently use the fast lock-free path of the custom
+// RWLock (see its definition for details) before falling back, per extra thread beyond this count, to an
+// exclusive-lock-like path that still is correct but loses the read/read concurrency. Raise this if more distinct
+// threads than the default are expected to concurrently call into a single Datastore instance. Each unit costs
+// CpuCacheLine bytes (128 by default) per RWLock instance (3 per Datastore), so even a generous value stays cheap.
+#ifndef LITECASK_RWLOCK_MAX_THREADS
+#define LITECASK_RWLOCK_MAX_THREADS 128
 #endif
 
 // Macros for likely and unlikely branching
@@ -368,7 +380,7 @@ class ArenaAllocator
         uint8_t* basePtr       = nullptr;
         size_t   usedSize      = 0;
         size_t   allocatedSize = 0;
-        bool     isEnoughSpace(size_t bytes) const { return usedSize + bytes < allocatedSize; }
+        bool     isEnoughSpace(size_t bytes) const { return usedSize + bytes <= allocatedSize; }
     };
     size_t             _allocatedBytes = 0;
     size_t             _currentIdx     = 0;
@@ -437,7 +449,9 @@ const lcOsFileHandle InvalidFileHandle = INVALID_HANDLE_VALUE;
 std::wstring
 utf8ToUtf16(const lcString& s)
 {
-    constexpr uint32_t offsetPerTrailingByte[3] = {0x0, 0x3080, 0xE2080};
+    // Index 3 (4-byte UTF-8 lead byte) covers codepoints above the BMP (U+10000-U+10FFFF), which need a
+    // UTF-16 surrogate pair on output rather than a single code unit.
+    constexpr uint32_t offsetPerTrailingByte[4] = {0x0, 0x3080, 0xE2080, 0x3C82080};
     std::wstring       outUtf16;
     outUtf16.reserve(s.size());
     const char* cursor   = &s[0];
@@ -451,13 +465,18 @@ utf8ToUtf16(const lcString& s)
             trailingBytes = 1;
         else if (((*cursor) & 0xF0) == 0xE0)
             trailingBytes = 2;
+        else if (((*cursor) & 0xF8) == 0xF0)
+            trailingBytes = 3;
         else {
             break;
-        }  // Failure, only 16 bits is supported, not 32 bits codepoints
+        }  // Failure, invalid UTF-8 lead byte
         if (cursor + trailingBytes >= endInput) { break; }  // Failure due to corrupted input
 
         uint32_t output = 0;
         switch (trailingBytes) {
+            case 3:
+                output += *cursor++;
+                output <<= 6;  // fall through
             case 2:
                 output += *cursor++;
                 output <<= 6;  // fall through
@@ -467,7 +486,16 @@ utf8ToUtf16(const lcString& s)
             case 0:
                 output += *cursor++;
         }
-        outUtf16.push_back((char16_t)(output - offsetPerTrailingByte[trailingBytes]));
+        output -= offsetPerTrailingByte[trailingBytes];
+
+        if (output < 0x10000) {
+            outUtf16.push_back((char16_t)output);
+        } else {
+            // Codepoint above the BMP: encode as a UTF-16 surrogate pair instead of truncating it into one unit
+            output -= 0x10000;
+            outUtf16.push_back((char16_t)(0xD800 + (output >> 10)));
+            outUtf16.push_back((char16_t)(0xDC00 + (output & 0x3FF)));
+        }
     }
 
     return outUtf16;
@@ -477,17 +505,30 @@ utf8ToUtf16(const lcString& s)
 lcString
 utf16ToUtf8(const std::wstring& s)
 {
-    constexpr uint8_t firstBytes[4] = {0x00, 0x00, 0xC0, 0xE0};
+    constexpr uint8_t firstBytes[5] = {0x00, 0x00, 0xC0, 0xE0, 0xF0};
     lcString          outUtf8;
     outUtf8.reserve(s.size());
 
-    for (wchar_t codepoint : s) {
-        if ((codepoint >= 0xD800 && codepoint <= 0xDBFF)) break;  // Failure, corrupted input
-        int outSize = (codepoint < 0x80) ? 1 : ((codepoint < 0x800) ? 2 : 3);
+    for (size_t i = 0; i < s.size(); ++i) {
+        uint32_t codepoint = (uint16_t)s[i];
+        if (codepoint >= 0xD800 && codepoint <= 0xDBFF) {
+            // High surrogate: combine with the following low surrogate into the full codepoint it represents
+            if (i + 1 >= s.size()) break;  // Failure, corrupted input (truncated surrogate pair)
+            uint32_t low = (uint16_t)s[i + 1];
+            if (low < 0xDC00 || low > 0xDFFF) break;  // Failure, corrupted input (unpaired high surrogate)
+            codepoint = 0x10000 + ((codepoint - 0xD800) << 10) + (low - 0xDC00);
+            ++i;
+        } else if (codepoint >= 0xDC00 && codepoint <= 0xDFFF) {
+            break;  // Failure, corrupted input (unpaired low surrogate)
+        }
+        int outSize = (codepoint < 0x80) ? 1 : ((codepoint < 0x800) ? 2 : (codepoint < 0x10000) ? 3 : 4);
 
         size_t curSize = outUtf8.size();
         outUtf8.resize(curSize + outSize);
         switch (outSize) {
+            case 4:
+                outUtf8[curSize + 3] = (uint8_t)((codepoint | 0x80) & 0xBF);
+                codepoint >>= 6;  // fall through
             case 3:
                 outUtf8[curSize + 2] = (uint8_t)((codepoint | 0x80) & 0xBF);
                 codepoint >>= 6;  // fall through
@@ -557,6 +598,26 @@ osIsValidHandle(lcOsFileHandle handle)
     return (handle != InvalidFileHandle);
 }
 
+// Opens (creating if needed) and takes an exclusive OS-level lock on 'path', held for as long as the returned
+// handle stays open: no sharing is requested at all, so any other handle (this process or another) already open
+// on the same path, or opened afterwards, fails immediately with ERROR_SHARING_VIOLATION.
+inline lcOsFileHandle
+osExclusiveLockOpen(const fs::path& path)
+{
+    return CreateFileW((LPCWSTR)utf8ToUtf16(path.string()).c_str(), GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_ALWAYS,
+                       FILE_ATTRIBUTE_NORMAL, NULL);
+}
+
+inline bool
+osWriteAtStart(lcOsFileHandle handle, const void* buffer, size_t bufferSize)
+{
+    DWORD      writtenBytes;
+    OVERLAPPED overlap = {0};  // Offset 0: start of file
+    bool       status  = WriteFile(handle, buffer, (DWORD)bufferSize, &writtenBytes, &overlap);
+    if (!status && GetLastError() == ERROR_IO_PENDING) { status = GetOverlappedResult(handle, &overlap, &writtenBytes, TRUE); }
+    return status;
+}
+
 #else
 // Linux
 using lcOsFileHandle                       = int;
@@ -605,107 +666,86 @@ osIsValidHandle(lcOsFileHandle handle)
     return (handle > InvalidFileHandle);
 }
 
+// Opens (creating if needed) and takes an exclusive, non-blocking flock() on 'path', held for as long as the
+// returned handle stays open. flock() locks belong to the open file description, not the process, so a second
+// open+lock from the very same process (e.g. two Datastore instances) correctly conflicts too, just like a
+// genuinely different process would.
+inline lcOsFileHandle
+osExclusiveLockOpen(const lcString& path)
+{
+    int fd = ::open(path.c_str(), O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
+    if (fd < 0) { return InvalidFileHandle; }
+    if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        int savedErrno = errno;  // ::close() below could otherwise clobber it before the caller inspects it
+        ::close(fd);
+        errno = savedErrno;
+        return InvalidFileHandle;
+    }
+    return fd;
+}
+
+inline bool
+osWriteAtStart(lcOsFileHandle handle, const void* buffer, size_t bufferSize)
+{
+    return (pwrite(handle, buffer, bufferSize, 0) == (ssize_t)bufferSize);
+}
+
 #endif
+
+// Opens a file for standard (buffered) usage with an enlarged buffer, suited for the sequential large I/O
+// performed during merge/hint-file/data-file operations (the default stdio buffer is typically only a few KB).
+inline FILE*
+osFopenBuffered(const fs::path& path, const lcString& mode, size_t bufferSize)
+{
+    FILE* fh = osFopen(path, mode);
+    if (fh) { setvbuf(fh, nullptr, _IOFBF, bufferSize); }
+    return fh;
+}
 
 // ==========================================================================================
 // Lock file (to ensure that at most 1 process accesses the same database)
 // ==========================================================================================
+// The lock is an OS-level advisory lock (flock on Linux, an exclusively-opened handle on Windows), acquired once
+// and held open for the whole lifetime of the Datastore. This is robust to process crashes: the OS releases the
+// lock automatically when the holding process's file descriptor/handle goes away, whether closed cleanly or via
+// process termination (including SIGKILL) - so, unlike a PID recorded in a text file, a stale lock left behind by
+// a crashed process can never be misattributed to an unrelated later process that happens to reuse the same PID.
 
 inline Status
-lockDatabase(const fs::path& dbDirectory)
+lockDatabase(const fs::path& dbDirectory, lcOsFileHandle& outLockHandle)
 {
     fs::path lockFilename = dbDirectory / "litecask.lockfile";
 
-    int64_t ourPid = getpid();
-    char    pidString[32];
-
-    constexpr int MaxTryQty       = 3;
-    int           remainingTryQty = MaxTryQty;
-    while (remainingTryQty > 0) {
-        if (remainingTryQty != MaxTryQty) { std::this_thread::sleep_for(std::chrono::milliseconds(100)); }
-        remainingTryQty--;
-
-        // Check the current lock file, if exists
-        if (fs::exists(lockFilename)) {
-            // Read the content
-            FILE* fh = osFopen(lockFilename, "rb");
-            if (!fh) { continue; }
-            size_t length = fread(pidString, 1, sizeof(pidString) - 1, fh);
-            fclose(fh);
-            if (length <= 0 || length >= sizeof(pidString)) { continue; }  // Lock content may not be written yet
-            pidString[length] = 0;
-            int64_t readPid   = strtoll(pidString, nullptr, 10);
-            if (readPid == 0) { continue; }  // Weird case, the written content seems not a hex number, as it should...
-
-            // Check against the current processes in the system
+    lcOsFileHandle handle = osExclusiveLockOpen(lockFilename.string());
+    if (!osIsValidHandle(handle)) {
 #if defined(_MSC_VER)
-            // Windows: The 'OpenProcess' API allows to check if the process with ID 'readPid' is still alive.
-            // Note: it shall not exit with code "STILL_ACTIVE" (239) for this to work
-            bool   isProcessStillRunning = true;
-            HANDLE hPrevProc             = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, (DWORD)readPid);
-            if (hPrevProc == NULL) {
-                isProcessStillRunning = false;
-            } else {
-                DWORD cr;
-                if (GetExitCodeProcess(hPrevProc, &cr) == 0 || cr != STILL_ACTIVE) { isProcessStillRunning = false; }
-                CloseHandle(hPrevProc);
-            }
-            if (isProcessStillRunning) { return Status::StoreAlreadyInUse; }  // Database is locked by an existing process
+        DWORD lastError = GetLastError();
+        return (lastError == ERROR_SHARING_VIOLATION || lastError == ERROR_LOCK_VIOLATION) ? Status::StoreAlreadyInUse :
+                                                                                             Status::BadDiskAccess;
 #else
-            // Linux: Check in the virtual filesystem of the kernel if a process with ID 'ReadPid' is listed
-            lcVector<DirEntry> entries;
-            if (!osGetDirContent("/proc/", entries)) { return Status::BadDiskAccess; }
-            for (const auto& e : entries) {
-                if (!e.isDir) continue;  // We search only directory with the PID as name
-                if (!strcmp(e.name.c_str(), pidString)) { return Status::StoreAlreadyInUse; }  // Database is locked by an existing process
-            }
+        return (errno == EWOULDBLOCK) ? Status::StoreAlreadyInUse : Status::BadDiskAccess;
 #endif
+    }
 
-            // Not a valid lock: we remove it
-            if (!osRemoveFile(lockFilename)) { return Status::BadDiskAccess; }
-        }
+    // Best-effort: record our PID in the lock file, for diagnostic purposes only (not used for locking correctness).
+    // Fixed width and space-padded so that rewriting it later (e.g. a shorter PID than a previous run) never
+    // leaves stale trailing digits from the previous content.
+    constexpr size_t PidFieldWidth = 20;  // Enough for any int64_t, with margin
+    char             pidString[PidFieldWidth + 1];
+    snprintf(pidString, sizeof(pidString), "%-20" PRId64, (int64_t)getpid());
+    osWriteAtStart(handle, pidString, PidFieldWidth);
 
-        FILE* fh = osFopen(lockFilename, "wbx");  // 'x' ensures that the file is created by this call
-        if (!fh) { continue; }
-        snprintf(pidString, sizeof(pidString), "%" PRId64, ourPid);
-        if (fwrite(pidString, 1, strlen(pidString), fh) != (size_t)strlen(pidString)) {
-            fclose(fh);
-            return Status::BadDiskAccess;
-        }
-        fclose(fh);
-        return Status::Ok;
-
-    }  // End of retries
-
-    return Status::BadDiskAccess;
+    outLockHandle = handle;
+    return Status::Ok;
 }
 
-inline Status
-unlockDatabase(const fs::path& dbDirectory)
+inline void
+unlockDatabase(lcOsFileHandle& lockHandle)
 {
-    fs::path lockFilename = dbDirectory / "litecask.lockfile";
-    if (!fs::exists(lockFilename)) { return Status::Ok; }  // Weird, but it is supposed that the lock is no more valid
-
-    // Sanity: check that it is indeed our lock (the content shall be our PID)
-    // Read the content
-    int64_t ourPid = getpid();
-    char    pidString[32];
-
-    FILE* fh = osFopen(lockFilename, "rb");
-    if (!fh) { return Status::Ok; }  // Weird case. Anyway, it is then assumed that the lock is no more valid
-    size_t length = fread(pidString, 1, sizeof(pidString) - 1, fh);
-    fclose(fh);
-
-    if (length <= 0 || length >= sizeof(pidString)) {
-        return Status::Ok;
-    }  // Weird case. Anyway, it is then assumed that the lock is no more valid
-    pidString[length] = 0;
-    int64_t readPid   = strtoll(pidString, nullptr, 10);
-    if (readPid != ourPid) { return Status::Ok; }  // Weird case. Anyway, it is then assumed that the lock is no more valid
-
-    // Our lock: we remove it
-    if (!osRemoveFile(lockFilename)) { return Status::BadDiskAccess; }
-    return Status::Ok;
+    if (osIsValidHandle(lockHandle)) {
+        osOsClose(lockHandle);
+        lockHandle = InvalidFileHandle;
+    }
 }
 
 }  // namespace
@@ -734,9 +774,12 @@ constexpr uint32_t   DeletedEntry         = 0xFFFFFFFF;
 constexpr ValueLoc   NotStored            = 0xFFFFFFFF;  // Sentinel for "not stored"
 constexpr size_t     MaxValueSize         = 0xFFFF0000;
 
-// KeyDir table associativity. 1 is classical (1-associative), 8 is max for the cache line (8-associative so 8*8=64 bytes)
-// Power of two is expected to keep the cache line alignment, so valid values are 1, 2, 4 and 8
-constexpr uint32_t KeyDirAssocQty = 8;
+// KeyDir (and IndexMap) table associativity: quantity of 8-byte MapEntry slots grouped into one probed "bucket".
+// 16 makes one bucket exactly CpuCacheLine bytes (128 by default: 16*8), so that two adjacent buckets never end up
+// sharing a cache line / destructive-interference unit, which would otherwise cause false sharing between a writer
+// and a reader concurrently probing neighboring buckets. Power of two is required to keep this alignment, and the
+// configured KeyDir/IndexMap initial size must stay a multiple of this value (true for the library's own default).
+constexpr uint32_t KeyDirAssocQty = 16;
 
 // Arbitrary constant value. On a range of first 256 bytes of a key, 64 indexes should be enough for everyone
 constexpr uint32_t MaxKeyIndexQty = 64;
@@ -786,7 +829,8 @@ struct MapEntry {
     KeyLoc   loc;
 };
 
-// 2) Second part is the metadata pointed by the first part, of 22 bytes + key size
+// 2) Second part is the metadata pointed by the first part, of sizeof(KeyChunk) (24 bytes, 22 bytes of fields
+//    rounded up by alignment padding) + key size. All offset arithmetic uses sizeof(KeyChunk), never a literal.
 struct KeyChunk {
     uint32_t expTimeSec;
     uint32_t valueSize;  // max key+value size is 4GB
@@ -992,8 +1036,8 @@ class RWLock
 // before going to the kernel, improving the reactivity in most cases.
 class RWLock
 {
-    // Soft limit on the thread quantity before switching to exclusive lock as a fallback
-    static constexpr uint64_t MaxThreads = 32;
+    // Soft limit on the thread quantity before switching to exclusive lock as a fallback. See LITECASK_RWLOCK_MAX_THREADS.
+    static constexpr uint64_t MaxThreads = LITECASK_RWLOCK_MAX_THREADS;
 
    public:
     RWLock() : excLockReq(false), stateArraySptr(std::make_shared<StateArray>()), stateArray(*stateArraySptr)
@@ -1018,9 +1062,15 @@ class RWLock
             if (((++counter) & 0x0FFFFF) == 0) { std::this_thread::yield(); }  // Back to OS scheduler if too long spinning
         }
 
-        // Wait for readers to stop using the shared lock
-        for (auto& i : stateArray) {
-            while (i.state.load(std::memory_order_seq_cst) >= Busy) {}
+        // Wait for readers to stop using the shared lock. Only the slots that have ever been registered by a
+        // thread need scanning: 'registeredSlotQty' is a high-water mark bumped (in program order, hence
+        // necessarily before any of that thread's Busy stores) the first time a thread registers a slot, so any
+        // reader already Busy from before this writer arrived is guaranteed to be within this range (see
+        // lockRead() below for the argument). This keeps lockWrite() cheap even with a large MaxThreads when
+        // only a few threads actually ever use this lock, instead of always scanning the full static array.
+        uint32_t usedSlotQty = registeredSlotQty.load(std::memory_order_seq_cst);
+        for (uint32_t i = 0; i < usedSlotQty; ++i) {
+            while (stateArray[i].state.load(std::memory_order_seq_cst) >= Busy) {}
         }
     }
 
@@ -1041,6 +1091,12 @@ class RWLock
                 if (stateArray[idx].state == Uninit && stateArray[idx].state.compare_exchange_strong(oldValue, Free)) {
                     accessIndex(idx);
                     threadIndex = idx;
+                    // Bump the high-water mark used by lockWrite() to bound its scan. This happens strictly
+                    // before this thread can ever store Busy into this slot (see program order below), which is
+                    // the property lockWrite() relies on.
+                    uint32_t needed  = (uint32_t)idx + 1;
+                    uint32_t current = registeredSlotQty.load(std::memory_order_seq_cst);
+                    while (current < needed && !registeredSlotQty.compare_exchange_weak(current, needed, std::memory_order_seq_cst)) {}
                     break;
                 }
             }
@@ -1150,11 +1206,12 @@ class RWLock
     }
 
     // Fields
-    std::atomic<bool>    excLockReq;
-    const StateArraySptr stateArraySptr;          // Shared with thread local contexts
-    uint8_t              reserved[CpuCacheLine];  // Prevent false sharing between threads
-    StateArray&          stateArray;              // Intra-object local access, protected by the internal shared ptr
-    uint32_t             uniqueLockId;
+    std::atomic<bool>     excLockReq;
+    const StateArraySptr  stateArraySptr;          // Shared with thread local contexts
+    uint8_t               reserved[CpuCacheLine];  // Prevent false sharing between threads
+    StateArray&           stateArray;              // Intra-object local access, protected by the internal shared ptr
+    uint32_t              uniqueLockId;
+    std::atomic<uint32_t> registeredSlotQty = 0;  // High-water mark of stateArray slots ever registered by a thread
 };
 
 #endif
@@ -1611,7 +1668,7 @@ class ValueCache
     bool setTargetMemoryLoad(double load)
     {
         if (load < 0. || load > 1.0) { return false; }
-        _targetMemoryLoad = load;
+        _targetMemoryLoad.store(load, std::memory_order_relaxed);
         return true;
     }
 
@@ -1783,7 +1840,8 @@ class ValueCache
     {
         if (!isEnabled()) { return; }
 
-        uint64_t targetAllocatedBytes = (uint64_t)(_targetMemoryLoad * (double)_tlsfAlloc.getMaxAllocatableBytes());
+        uint64_t targetAllocatedBytes =
+            (uint64_t)(_targetMemoryLoad.load(std::memory_order_relaxed) * (double)_tlsfAlloc.getMaxAllocatableBytes());
 
         // Loop until no more work to do or batch exhausted
         while ((batchSize--) > 0 && _tlsfAlloc.getAllocatedBytes() > targetAllocatedBytes) {
@@ -1928,10 +1986,10 @@ class ValueCache
         ValueLoc tail  = NotStored;
         uint32_t bytes = 0;
     };
-    std::mutex _mxLrus;
-    std::mutex _mxMalloc;
-    LruQueue   _queues[(uint32_t)LruType::Qty];
-    double     _targetMemoryLoad = 0.90;
+    std::mutex          _mxLrus;
+    std::mutex          _mxMalloc;
+    LruQueue            _queues[(uint32_t)LruType::Qty];
+    std::atomic<double> _targetMemoryLoad = 0.90;  // Written by setConfig() (main thread), read by the upkeep thread
 
     TlsfAllocator                         _tlsfAlloc;
     ValueCacheCounters                    _stats;
@@ -2290,16 +2348,19 @@ class KeyDirMap
         ++probeIncr; /* Between linear and quadratic probing */                                                         \
     }
 
-#define LITECASK_FIND_KEY_AND_DO_ACTION(parameterActionCode)                                     \
-    uint32_t mask;                                                                               \
-    int      idx;                                                                                \
-    uint32_t probeIncr;                                                                          \
-    if (keyHash < FirstValid) keyHash += FirstValid;                                             \
-    Table* currentTable = ((_signalBitmap.load() & CurrentTableNbr) == 0) ? &_table0 : &_table1; \
-    LITECASK_FIND_KEY_LOOP(parameterActionCode);                                                 \
-    if (_signalBitmap.load() & UnderResizing) { /* Try the other table */                        \
-        currentTable = (currentTable == &_table0) ? &_table1 : &_table0;                         \
-        LITECASK_FIND_KEY_LOOP(parameterActionCode);                                             \
+#define LITECASK_FIND_KEY_AND_DO_ACTION(parameterActionCode)                                                \
+    uint32_t mask;                                                                                          \
+    int      idx;                                                                                           \
+    uint32_t probeIncr;                                                                                     \
+    if (keyHash < FirstValid) keyHash += FirstValid;                                                        \
+    /* Single snapshot: using two separate loads here could let a resize complete in between, making the */ \
+    /* 'other table' check below miss a key that was migrated into the already-scanned table meanwhile. */  \
+    uint64_t signalBitmapSnapshot = _signalBitmap.load();                                                   \
+    Table*   currentTable         = ((signalBitmapSnapshot & CurrentTableNbr) == 0) ? &_table0 : &_table1;  \
+    LITECASK_FIND_KEY_LOOP(parameterActionCode);                                                            \
+    if (signalBitmapSnapshot & UnderResizing) { /* Try the other table */                                   \
+        currentTable = (currentTable == &_table0) ? &_table1 : &_table0;                                    \
+        LITECASK_FIND_KEY_LOOP(parameterActionCode);                                                        \
     }
 
 #define LITECASK_FIND_HASH_LOOP(parameterActionCode)                                                                    \
@@ -2320,24 +2381,32 @@ class KeyDirMap
         ++probeIncr; /* Between linear and quadratic probing */                                                         \
     }
 
-#define LITECASK_FIND_HASH_AND_DO_ACTION(parameterActionCode)                                    \
-    uint32_t mask;                                                                               \
-    int      idx;                                                                                \
-    uint32_t probeIncr;                                                                          \
-    if (keyHash < FirstValid) keyHash += FirstValid;                                             \
-    Table* currentTable = ((_signalBitmap.load() & CurrentTableNbr) == 0) ? &_table0 : &_table1; \
-    LITECASK_FIND_HASH_LOOP(parameterActionCode);                                                \
-    if (_signalBitmap.load() & UnderResizing) { /* Try the other table */                        \
-        currentTable = (currentTable == &_table0) ? &_table1 : &_table0;                         \
-        LITECASK_FIND_HASH_LOOP(parameterActionCode);                                            \
+#define LITECASK_FIND_HASH_AND_DO_ACTION(parameterActionCode)                                               \
+    uint32_t mask;                                                                                          \
+    int      idx;                                                                                           \
+    uint32_t probeIncr;                                                                                     \
+    if (keyHash < FirstValid) keyHash += FirstValid;                                                        \
+    /* Single snapshot: using two separate loads here could let a resize complete in between, making the */ \
+    /* 'other table' check below miss a key that was migrated into the already-scanned table meanwhile. */  \
+    uint64_t signalBitmapSnapshot = _signalBitmap.load();                                                   \
+    Table*   currentTable         = ((signalBitmapSnapshot & CurrentTableNbr) == 0) ? &_table0 : &_table1;  \
+    LITECASK_FIND_HASH_LOOP(parameterActionCode);                                                           \
+    if (signalBitmapSnapshot & UnderResizing) { /* Try the other table */                                   \
+        currentTable = (currentTable == &_table0) ? &_table1 : &_table0;                                    \
+        LITECASK_FIND_HASH_LOOP(parameterActionCode);                                                       \
     }
 
     void updateMergedValueLocation(uint32_t keyHash, uint16_t oldFileId, uint32_t oldFileOffset, uint16_t newFileId, uint32_t newFileOffset)
     {
         LITECASK_FIND_HASH_AND_DO_ACTION({
             if (keyChunk->fileId == oldFileId && keyChunk->fileOffset == oldFileOffset) {
+                // Bracket the mutation with the optimistic counter, like every other KeyDir writer, so that a
+                // concurrent lock-free reader (find/getKeyAndIndexes) detects the torn read and retries instead of
+                // possibly acting on a half-updated fileId/fileOffset pair.
+                _optimisticsCounters[keyHash & OptCounterMask]++;
                 keyChunk->fileId     = newFileId;
                 keyChunk->fileOffset = newFileOffset;
+                _optimisticsCounters[keyHash & OptCounterMask]++;
                 return;
             }
             // Continue looking for another entry with the same hash in the keydir
@@ -2349,7 +2418,11 @@ class KeyDirMap
     {
         LITECASK_FIND_KEY_AND_DO_ACTION({
             if (keyChunk->valueSize == checkValueSize && keyChunk->changeCounter == checkChangeCounter) {
+                // Bracket the mutation with the optimistic counter, like every other KeyDir writer, so that a
+                // concurrent lock-free reader (find/getKeyAndIndexes) detects the torn read and retries.
+                _optimisticsCounters[keyHash & OptCounterMask]++;
                 keyChunk->cacheLocation = newCacheLocation;
+                _optimisticsCounters[keyHash & OptCounterMask]++;
             }
             return;
         });
@@ -2362,7 +2435,10 @@ class KeyDirMap
             bool     wasNotTheRightHash = false;
             uint32_t lockCounterBefore;
             do {
-                lockCounterBefore     = _optimisticsCounters[keyHash & OptCounterMask];  // Optimistic locking
+                lockCounterBefore = _optimisticsCounters[keyHash & OptCounterMask];  // Optimistic locking
+                // Re-fetch the chunk pointer: a concurrent update may have relocated it (e.g. to grow its storage),
+                // so a pointer captured before this point (or in a previous loop iteration) may now be dangling.
+                keyChunk              = getKey(currentTable->nodes[idx + cellId].loc);
                 uint32_t valueSize    = keyChunk->valueSize;
                 uint16_t keySize      = keyChunk->keySize;
                 uint8_t  keyIndexSize = keyChunk->keyIndexSize;
@@ -2428,7 +2504,10 @@ class KeyDirMap
             uint32_t lockCounterBefore;
             do {
                 lockCounterBefore = _optimisticsCounters[keyHash & OptCounterMask];  // Optimistic locking
-                entry             = *keyChunk;
+                // Re-fetch the chunk pointer: a concurrent update may have relocated it (e.g. to grow its storage),
+                // so a pointer captured before this point (or in a previous loop iteration) may now be dangling.
+                keyChunk = getKey(currentTable->nodes[idx + cellId].loc);
+                entry    = *keyChunk;
             } while ((lockCounterBefore & 0x1) ||
                      (_optimisticsCounters[keyHash & OptCounterMask]) != lockCounterBefore);  // Odd means under write
             return true;
@@ -3005,7 +3084,7 @@ class Datastore  // NOLINT(clang-analyzer-optin.performance.Padding)  Padding is
         }
 
         // Lock the database via a lock file
-        Status s = lockDatabase(dbDirectoryPath);
+        Status s = lockDatabase(dbDirectoryPath, _lockFileHandle);
         if (s != Status::Ok) {
             ++_stats.openCallFailedQty;
             log(LogLevel::Error, "'open' failed: unable to lock the datastore, %s.", toString(s));
@@ -3017,13 +3096,14 @@ class Datastore  // NOLINT(clang-analyzer-optin.performance.Padding)  Padding is
         if (s != Status::Ok) {
             ++_stats.openCallFailedQty;
             log(LogLevel::Error, "'open' failed: unable to clean the datastore, %s.", toString(s));
+            unlockDatabase(_lockFileHandle);
             return s;
         }
 
         if (!doCreateIfNotExist && baseDataFilenames.empty()) {
             ++_stats.openCallFailedQty;
             log(LogLevel::Error, "'open' failed because there is no datastore at the provided path.");
-            unlockDatabase(dbDirectoryPath);
+            unlockDatabase(_lockFileHandle);
             return Status::CannotOpenStore;
         }
 
@@ -3062,6 +3142,7 @@ class Datastore  // NOLINT(clang-analyzer-optin.performance.Padding)  Padding is
                 if (!loadDataFile(baseDataFilename + DataFileSuffix, fileId, loadArena, keyDirEntries)) {
                     ++_stats.openCallFailedQty;
                     log(LogLevel::Error, "'open' failed: unable to read the datastore.");
+                    unlockDatabase(_lockFileHandle);
                     return Status::CannotOpenStore;
                 }
             }
@@ -3184,7 +3265,7 @@ class Datastore  // NOLINT(clang-analyzer-optin.performance.Padding)  Padding is
         _activeDataFileId        = 0;
         _activeFlushedDataOffset = 0;
 
-        unlockDatabase(_directory);
+        unlockDatabase(_lockFileHandle);
 
         // Reset the state
         _directory.clear();
@@ -3224,7 +3305,7 @@ class Datastore  // NOLINT(clang-analyzer-optin.performance.Padding)  Padding is
             }
             lastIdx = ki;
         }
-        if (valueSize >= detail::MaxValueSize) {
+        if (valueSize > detail::MaxValueSize) {
             ++_stats.putCallFailedQty;
             return Status::BadValueSize;
         }
@@ -3305,13 +3386,14 @@ class Datastore  // NOLINT(clang-analyzer-optin.performance.Padding)  Padding is
         _dataFiles[entryActiveDataFileId]->entries += 1;
 
         _mxDataFiles.unlockRead();
-        _mxActiveFile.unlock();
 
         // Push in cache
         ValueLoc cacheLoc = NotStored;
         if (_valueCache->isEnabled()) { cacheLoc = _valueCache->insertValue(value, (uint32_t)valueSize, keyHash, expTimeSec); }
 
-        // Update the KeyDir
+        // Update the KeyDir. Note: this must happen before releasing '_mxActiveFile', which is what serializes the
+        // order of writes to the data file. Otherwise, two concurrent put() calls on the same key could apply their
+        // KeyDir update in the opposite order of their data file write, leaving the KeyDir pointing at the stale entry.
         OldKeyChunk oldEntry;
         _mxKeyDir.lock();
         Status storageStatus = _keyDir->insertEntry((uint32_t)keyHash, key, keyIndexes.data(),
@@ -3319,6 +3401,7 @@ class Datastore  // NOLINT(clang-analyzer-optin.performance.Padding)  Padding is
                                                      entryActiveDataFileId, (uint16_t)keySize, (uint8_t)keyIndexSize, (uint8_t)checksum},
                                                     oldEntry);
         _mxKeyDir.unlock();
+        _mxActiveFile.unlock();
 
         if (storageStatus != Status::Ok) {  // Can be too big a key (precise check done here) or out of memory
             if (storageStatus == Status::OutOfMemory) {
@@ -3482,15 +3565,18 @@ class Datastore  // NOLINT(clang-analyzer-optin.performance.Padding)  Padding is
         _dataFiles[entryActiveDataFileId]->entries += 1;
 
         _mxDataFiles.unlockRead();
-        _mxActiveFile.unlock();
 
-        // Update the KeyDir with a tombstone
+        // Update the KeyDir with a tombstone. Note: this must happen before releasing '_mxActiveFile', which is what
+        // serializes the order of writes to the data file. Otherwise, a concurrent put()/remove() on the same key
+        // could apply its KeyDir update in the opposite order of its data file write, leaving the KeyDir pointing at
+        // the stale entry.
         _mxKeyDir.lock();
         OldKeyChunk oldEntry;
         Status      storageStatus = _keyDir->insertEntry(
             (uint32_t)keyHash, key, nullptr,
             {0, DeletedEntry, NotStored, entryActiveDataOffset, entryActiveDataFileId, (uint16_t)keySize, 0, 0}, oldEntry);
         _mxKeyDir.unlock();
+        _mxActiveFile.unlock();
 
         if (storageStatus != Status::Ok) {
             if (storageStatus == Status::OutOfMemory) {
@@ -3600,6 +3686,7 @@ class Datastore  // NOLINT(clang-analyzer-optin.performance.Padding)  Padding is
         // Check the value consistency. Read errors are caught here too
         uint32_t checksum = (uint32_t)(keyHash ^ LITECASK_HASH_FUNC(&value[valueStartOffset], entry.valueSize));
         if (!isReadOk || checksum != ((DataFileEntry*)value.data())->checksum) {
+            value.clear();  // Do not leak the raw on-disk bytes (metadata/key/possibly-garbage value) to the caller
             ++_stats.getCallCorruptedQty;
             return Status::EntryCorrupted;
         }
@@ -3864,8 +3951,8 @@ class Datastore  // NOLINT(clang-analyzer-optin.performance.Padding)  Padding is
 
             // We use fopen/fread/fwrite here because of standard usage and the provided buffering
             // By design, we never merge the active file
-            FILE* fhr = osFopen(dfd->filename, "rb");
-            assert(fhr);
+            FILE* fhr = osFopenBuffered(dfd->filename, "rb", DiskWorkBufferSize);
+            if (!fhr) { fatalHandler("Unable to open data file %s for reading during merge file creation.", dfd->filename.c_str()); }
             readFileOffset = 0;
 
             // Loop on entries
@@ -3938,13 +4025,17 @@ class Datastore  // NOLINT(clang-analyzer-optin.performance.Padding)  Padding is
                         assert(currentDataFile);
                         log(LogLevel::Debug, "Finished compacted file %s. Removing the '%s' suffix.", currentDataFile->filename.c_str(),
                             TmpFileSuffix);
-                        [[maybe_unused]] bool isOk = osRenameFile(currentDataFile->filename + TmpFileSuffix, currentDataFile->filename);
-                        assert(isOk);
+                        if (!osRenameFile(currentDataFile->filename + TmpFileSuffix, currentDataFile->filename)) {
+                            fatalHandler("Unable to rename temp data file for %s during merge file creation.",
+                                         currentDataFile->filename.c_str());
+                        }
                         currentDataFile->handle = osOsOpen(currentDataFile->filename, OsOpenMode::READ);
                         assert(osIsValidHandle(currentDataFile->handle));
                         fs::path hintFilename = fs::path(currentDataFile->filename).replace_extension(HintFileSuffix);
-                        isOk                  = osRenameFile(hintFilename.string() + TmpFileSuffix, hintFilename);
-                        assert(isOk);
+                        if (!osRenameFile(hintFilename.string() + TmpFileSuffix, hintFilename)) {
+                            fatalHandler("Unable to rename temp hint file for %s during merge file creation.",
+                                         currentDataFile->filename.c_str());
+                        }
                     }
 
                     // Create the next compacted file to write in
@@ -3960,13 +4051,13 @@ class Datastore  // NOLINT(clang-analyzer-optin.performance.Padding)  Padding is
                     currentDataFile->filename = dataFilename;
                     currentDataFile->handle =
                         InvalidFileHandle;  // Will be opened for read only when the temporary file is complete and renamed
-                    fhw = osFopen(lcString(dataFilename) + TmpFileSuffix, "wb");
+                    fhw = osFopenBuffered(lcString(dataFilename) + TmpFileSuffix, "wb", DiskWorkBufferSize);
                     if (!fhw) {
                         fatalHandler("Unable to open temp data file for %s during merge file creation.", currentDataFile->filename.c_str());
                     }
                     writeFileOffset       = 0;
                     fs::path hintFilename = fs::path(currentDataFile->filename).replace_extension(HintFileSuffix);
-                    fhhw                  = osFopen(hintFilename.string() + TmpFileSuffix, "wb");
+                    fhhw                  = osFopenBuffered(hintFilename.string() + TmpFileSuffix, "wb", DiskWorkBufferSize);
                     if (!fhhw) {
                         fatalHandler("Unable to open temp hint file for %s during merge file creation.", currentDataFile->filename.c_str());
                     }
@@ -4054,23 +4145,32 @@ class Datastore  // NOLINT(clang-analyzer-optin.performance.Padding)  Padding is
             }
             _mxKeyDir.unlock();
 
-            if (osIsValidHandle(dfd->handle)) {
+            bool     doRemoveFiles = osIsValidHandle(dfd->handle);
+            lcString oldFilename;
+            if (doRemoveFiles) {
                 osOsClose(dfd->handle);
                 dfd->handle = InvalidFileHandle;
-
-                // Remove the files associated with this old data file. The order below matters in case of hard interruption.
-                // First remove the old data file
-                osRemoveFile(dfd->filename);
-                // Then the hint file (if it exists)
-                osRemoveFile(fs::path(dfd->filename).replace_extension(HintFileSuffix));
-                // Then, the removal tag
-                osRemoveFile(fs::path(dfd->filename).replace_extension(ToRemoveFileSuffix));
+                oldFilename = dfd->filename;  // Captured now: 'dfd' may be reused for a new file as soon as the lock is released
 
                 // Free the fileId for reuse
                 _freeDataFileIds.push_back(mergeInfo.fileId);
             }
 
             _mxDataFiles.unlockWrite();
+
+            // Remove the files associated with this old data file, now that its handle is closed and invalidated so
+            // no concurrent get()/put() can still be using it. This is done outside the write lock on purpose: that
+            // lock is also taken by every concurrent get()/put() in the whole store, so holding it across these
+            // unlink syscalls would stall them for no reason tied to the specific file(s) being removed here.
+            // The order below matters in case of hard interruption.
+            if (doRemoveFiles) {
+                // First remove the old data file
+                osRemoveFile(oldFilename);
+                // Then the hint file (if it exists)
+                osRemoveFile(fs::path(oldFilename).replace_extension(HintFileSuffix));
+                // Then, the removal tag
+                osRemoveFile(fs::path(oldFilename).replace_extension(ToRemoveFileSuffix));
+            }
         }
 
         return true;
@@ -4502,10 +4602,18 @@ class Datastore  // NOLINT(clang-analyzer-optin.performance.Padding)  Padding is
         log(LogLevel::Info, "Creating hint file for %s", readDataFilename.c_str());
 
         // We use fopen/fread/fwrite here because of standard usage and the provided buffering
-        FILE* fhr = osFopen(readDataFilename, "rb");
-        assert(fhr);
-        FILE* fhw = osFopen(writeHintFilename.string() + TmpFileSuffix, "wb");
-        assert(fhw);
+        FILE* fhr = osFopenBuffered(readDataFilename, "rb", DiskWorkBufferSize);
+        if (!fhr) {
+            log(LogLevel::Error, "Cannot create the hint file for %s: unable to open the data file for reading", readDataFilename.c_str());
+            return false;
+        }
+        FILE* fhw = osFopenBuffered(writeHintFilename.string() + TmpFileSuffix, "wb", DiskWorkBufferSize);
+        if (!fhw) {
+            log(LogLevel::Error, "Cannot create the hint file for %s: unable to open the temporary hint file for writing",
+                readDataFilename.c_str());
+            fclose(fhr);
+            return false;
+        }
 
         DataFileEntry     header;
         lcVector<uint8_t> buf(1024);
@@ -4573,9 +4681,9 @@ class Datastore  // NOLINT(clang-analyzer-optin.performance.Padding)  Padding is
         fclose(fhw);
         fclose(fhr);
 
-        if (isOk) {
-            [[maybe_unused]] bool isRenamingOk = osRenameFile(writeHintFilename.string() + TmpFileSuffix, writeHintFilename);
-            assert(isRenamingOk);
+        if (isOk && !osRenameFile(writeHintFilename.string() + TmpFileSuffix, writeHintFilename)) {
+            log(LogLevel::Error, "Cannot create the hint file for %s: unable to rename the temporary hint file", readDataFilename.c_str());
+            isOk = false;
         }
         return isOk;
     }
@@ -4592,7 +4700,7 @@ class Datastore  // NOLINT(clang-analyzer-optin.performance.Padding)  Padding is
         // We use fopen/fread/fwrite here because of standard usage and the provided buffering
         int64_t fileSize = osGetFileSize(hintFilename);
         if (fileSize <= 0) { return false; }
-        FILE* fh = osFopen(hintFilename, "rb");
+        FILE* fh = osFopenBuffered(hintFilename, "rb", DiskWorkBufferSize);
         if (!fh) { return false; }
 
         // Loading fully the hint file in one call, as we need anyway the key and keyindexes
@@ -4626,6 +4734,7 @@ class Datastore  // NOLINT(clang-analyzer-optin.performance.Padding)  Padding is
             if (header.keyIndexSize & 0x1) {
                 log(LogLevel::Error, "Cannot read the hint file %s: an index has an odd size (byte size=%d)", hintFilename.c_str(),
                     header.keyIndexSize);
+                isOk = false;
                 break;
             }
 
@@ -4660,7 +4769,7 @@ class Datastore  // NOLINT(clang-analyzer-optin.performance.Padding)  Padding is
         keyEntries.clear();
 
         // We use fopen/fread/fwrite here because of the provided buffering and sequential reading
-        FILE* fh = osFopen(dataFilename, "rb");
+        FILE* fh = osFopenBuffered(dataFilename, "rb", DiskWorkBufferSize);
         if (!fh) return false;
 
         DataFileEntry     header;
@@ -4686,12 +4795,14 @@ class Datastore  // NOLINT(clang-analyzer-optin.performance.Padding)  Padding is
             if (keyIndexSize > MaxKeyIndexQty * sizeof(KeyIndex)) {
                 log(LogLevel::Error, "Cannot load the data file %s: an index has a too big value (byte size=%d > %" PRId64 ")",
                     dataFilename.c_str(), keyIndexSize, MaxKeyIndexQty * sizeof(KeyIndex));
+                isOk = false;
                 break;
             }
 
             if (keyIndexSize & 0x1) {
                 log(LogLevel::Error, "Cannot load the data file %s: an index has an odd size (byte size=%d)", dataFilename.c_str(),
                     keyIndexSize);
+                isOk = false;
                 break;
             }
 
@@ -4925,6 +5036,7 @@ class Datastore  // NOLINT(clang-analyzer-optin.performance.Padding)  Padding is
 
     Config            _config;
     fs::path          _directory;
+    lcOsFileHandle    _lockFileHandle = InvalidFileHandle;
     DatastoreCounters _stats;
 };
 
