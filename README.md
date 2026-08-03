@@ -564,9 +564,9 @@ struct Config {
     //  Note: this value shall be less than the corresponding trigger threshold.
     uint32_t mergeSelectDataFileDeadByteThreshold = 12'800'000;
 
-    //  'mergeSelectDataFileSmallSizeTheshold' describes the minimum size below which a file is included in the merge.
+    //  'mergeSelectDataFileSmallSizeThreshold' describes the minimum size below which a file is included in the merge.
     //  The purpose is to reduce the quantity of small data files to keep open file quantity low.
-    uint32_t mergeSelectDataFileSmallSizeTheshold = 10'000'000;
+    uint32_t mergeSelectDataFileSmallSizeThreshold = 10'000'000;
 };
 
  ```

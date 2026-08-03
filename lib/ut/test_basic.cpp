@@ -84,7 +84,7 @@ TEST_SUITE("Basic")
         c.mergeTriggerDataFileDeadByteThreshold       = 10'000;
         c.mergeSelectDataFileFragmentationPercentage  = 1;
         c.mergeSelectDataFileDeadByteThreshold        = 9000;
-        c.mergeSelectDataFileSmallSizeTheshold        = 8000;
+        c.mergeSelectDataFileSmallSizeThreshold        = 8000;
         s                                             = store.setConfig(c);
         CHECK_EQ(s, Status::Ok);
 
@@ -109,7 +109,7 @@ TEST_SUITE("Basic")
         CHECK_BAD_PARAM_VALUE(mergeSelectDataFileFragmentationPercentage, 101, BadParameterValue);
         CHECK_BAD_PARAM_VALUE(mergeSelectDataFileFragmentationPercentage, 3, InconsistentParameterValues);
         CHECK_BAD_PARAM_VALUE(mergeSelectDataFileDeadByteThreshold, 10001, InconsistentParameterValues);
-        CHECK_BAD_PARAM_VALUE(mergeSelectDataFileSmallSizeTheshold, 1023, BadParameterValue);
+        CHECK_BAD_PARAM_VALUE(mergeSelectDataFileSmallSizeThreshold, 1023, BadParameterValue);
     }
 
     TEST_CASE("1-Sanity   : LockFile DB protection against multiple opening")
@@ -234,7 +234,7 @@ TEST_SUITE("Basic")
         c.mergeTriggerDataFileDeadByteThreshold       = 1024;
         c.mergeSelectDataFileFragmentationPercentage  = 40;
         c.mergeSelectDataFileDeadByteThreshold        = 1024;
-        c.mergeSelectDataFileSmallSizeTheshold        = 1024;
+        c.mergeSelectDataFileSmallSizeThreshold        = 1024;
         s                                             = store.setConfig(c);
         CHECK_EQ(s, Status::Ok);
 
@@ -480,7 +480,7 @@ TEST_SUITE("Basic")
         c.mergeTriggerDataFileDeadByteThreshold       = 10'000;
         c.mergeSelectDataFileFragmentationPercentage  = 1;
         c.mergeSelectDataFileDeadByteThreshold        = 9000;
-        c.mergeSelectDataFileSmallSizeTheshold        = 8000;
+        c.mergeSelectDataFileSmallSizeThreshold        = 8000;
         s                                             = store.setConfig(c);
         CHECK_EQ(s, Status::Ok);
 
