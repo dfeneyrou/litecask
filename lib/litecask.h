@@ -67,7 +67,7 @@ int main(int argc, char** argv)
 // Includes
 // ==========================================================================================
 
-#if defined(_MSC_VER)
+#if defined(_WIN32)
 // Windows
 #define NOMINMAX
 #include <intrin.h>
@@ -142,7 +142,7 @@ int main(int argc, char** argv)
 #define LITECASK_PRINTF_CHECK(formatStringIndex_, firstArgIndex_) \
     __attribute__((__format__(__printf__, formatStringIndex_, firstArgIndex_)))
 #define LITECASK_PRINTF_FORMAT_STRING
-#elif _MSC_VER
+#elif _WIN32
 #define LITECASK_PRINTF_CHECK(formatStringIndex_, firstArgIndex_)
 #define LITECASK_PRINTF_FORMAT_STRING _Printf_format_string_
 #else
@@ -440,7 +440,7 @@ osRemoveFile(const fs::path& path)
     return fs::remove(path, ec);
 }
 
-#if defined(_MSC_VER)
+#if defined(_WIN32)
 // Windows
 using lcOsFileHandle                   = HANDLE;
 const lcOsFileHandle InvalidFileHandle = INVALID_HANDLE_VALUE;
@@ -718,7 +718,7 @@ lockDatabase(const fs::path& dbDirectory, lcOsFileHandle& outLockHandle)
 
     lcOsFileHandle handle = osExclusiveLockOpen(lockFilename.string());
     if (!osIsValidHandle(handle)) {
-#if defined(_MSC_VER)
+#if defined(_WIN32)
         DWORD lastError = GetLastError();
         return (lastError == ERROR_SHARING_VIOLATION || lastError == ERROR_LOCK_VIOLATION) ? Status::StoreAlreadyInUse :
                                                                                              Status::BadDiskAccess;
@@ -918,7 +918,7 @@ struct DataFile {
 static inline void
 _wymum(uint64_t* A, uint64_t* B)
 {
-#if defined(_MSC_VER)
+#if defined(_WIN32)
     *A = _umul128(*A, *B, B);
 #else
     __uint128_t r = *A;
@@ -1293,7 +1293,7 @@ class TlsfAllocator
     TlsfAllocator(uint64_t maxAllocatableBytes)
     {
         if (maxAllocatableBytes) {
-#if defined(_MSC_VER)
+#if defined(_WIN32)
             // On Windows, virtual allocation is better done in two phases: first reserve the total, then commit by chunks
             SYSTEM_INFO sSysInfo;
             GetSystemInfo(&sSysInfo);
@@ -1314,7 +1314,7 @@ class TlsfAllocator
     ~TlsfAllocator()
     {
         if (_arenaMaxAllocatableBytes) {
-#if defined(_MSC_VER)
+#if defined(_WIN32)
             [[maybe_unused]] bool status = VirtualFree(_arenaBasePtr, 0, MEM_RELEASE);
             assert(status);
 #else
@@ -1572,7 +1572,7 @@ class TlsfAllocator
         uint64_t granularSize             = granularNewAllocatedSize - _arenaAllocatedBytes - TlsfBlockOverhead - firstAllocOverhead;
         if (granularNewAllocatedSize > _arenaMaxAllocatableBytes) { return false; }
 
-#if defined(_MSC_VER)
+#if defined(_WIN32)
         // Windows: Memory shall be committed before use
         [[maybe_unused]] void* committedPtr =
             VirtualAlloc(_arenaBasePtr + _arenaAllocatedBytes, granularNewAllocatedSize - _arenaAllocatedBytes, MEM_COMMIT, PAGE_READWRITE);
@@ -1604,7 +1604,7 @@ class TlsfAllocator
         return true;
     }
 
-#if defined(_MSC_VER)
+#if !defined(__GNUC__)
     static uint32_t countTrailingZeros(uint32_t v) { return _tzcnt_u32(v); }
     static uint32_t countLeadingZeros(uint64_t v) { return (uint32_t)_lzcnt_u64(v); }
 #else
