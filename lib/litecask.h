@@ -1672,8 +1672,14 @@ class ValueCache
         return true;
     }
 
-    // To call when all references to this memory is no more used
-    void reset() { _tlsfAlloc.reset(); }
+    // To call when all references to this memory is no more used. The LRU queues go with the memory: left linked to the chunks
+    // of a previous open, they pointed into blocks the allocator hands out again, and the upkeep thread unlinked whatever lay there
+    void reset()
+    {
+        _tlsfAlloc.reset();
+        for (LruQueue& queue : _queues) { queue = LruQueue(); }
+        _stats.currentInCacheValueQty = 0;
+    }
 
     bool isEnabled() const { return (getMaxAllocatableBytes() > 0); }
 
